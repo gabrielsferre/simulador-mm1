@@ -1,0 +1,18 @@
+#!/bin/sh
+op=""
+case $1 in
+    [0-9]) op="-O$1";;
+esac
+
+gcc main.c -Wall -lm -g $op -fdiagnostics-color=always || exit $?
+
+case $1 in
+    compile) exit 0;;
+    gdb)
+        if [ -n "$2" ]; then
+            gdb -tui a.out -ex "b $2" -ex r
+        else
+            gdb -tui a.out
+        fi;;
+    *) ./a.out;;
+esac
