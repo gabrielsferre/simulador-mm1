@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <math.h>
@@ -22,11 +23,17 @@ enum Disciplina {
 };
 
 typedef struct Metricas_ {
-    double somatorio_tempo_espera;
-    double somatorio_tempo_espera_ao_quadrado;
-    int coletas_clientes;
+    double somatorio_tempo_espera_rodada;
+    double somatorio_media_tempo_espera;
+    double somatorio_media_tempo_espera_quadrado;
     double area_Nq_versus_tempo;
+    double somatorio_media_Nq;
     double ultima_vez_que_atualizou_area;
+    double inicio_rodada;
+    int coletas_clientes;
+    int coletas_por_rodada;
+    int rodada;
+    int numero_de_rodadas;
 } Metricas;
 
 typedef struct Evento_ {
@@ -38,6 +45,7 @@ typedef struct ListaEventos_ {
     Evento array[1024];
     int tamanho_array;
     int tamanho_lista;
+    int chegadas_sem_servico;
 } ListaEventos;
 
 typedef struct Cliente_ { // cliente da fila
@@ -58,12 +66,40 @@ typedef struct Fila_ {
 } Fila;
 
 void
+atualiza_metricas_fim_da_rodada(Metricas *m)
+{
+    assert(m->coletas_clientes <= m->coletas_por_rodada);
+    // finaliza rodada
+    if(m->coletas_clientes >= m->coletas_por_rodada) {
+        // atualiza metricas
+        {
+            double media_tempo_espera =
+                m->somatorio_tempo_espera_rodada / m->coletas_clientes;
+            m->somatorio_media_tempo_espera += media_tempo_espera;
+            m->somatorio_media_tempo_espera_quadrado =
+                media_tempo_espera*media_tempo_espera;
+
+            double media_Nq = m->area_Nq_versus_tempo /
+                (m->ultima_vez_que_atualizou_area - m->inicio_rodada); // TODO: checar se faz sentido fazer '(ultima_vez_que_atualizou_area - inicio_rodada)'
+            m->somatorio_media_Nq += media_Nq;
+        }
+        // reinicia metricas da rodada
+        {
+            m->somatorio_tempo_espera_rodada = 0;
+            m->area_Nq_versus_tempo = 0;
+            m->coletas_clientes = 0;
+            m->inicio_rodada = m->ultima_vez_que_atualizou_area; // TODO: checar se isso faz sentido
+        }
+        m->rodada += 1;
+    }
+}
+
+void
 atualiza_metricas_tempo_espera(Cliente c, Metricas *m)
 {
     double tempo_espera = c.comeco_servico - c.chegada;
     assert(tempo_espera >= 0);
-    m->somatorio_tempo_espera += tempo_espera;
-    m->somatorio_tempo_espera_ao_quadrado += tempo_espera*tempo_espera;
+    m->somatorio_tempo_espera_rodada += tempo_espera;
     m->coletas_clientes += 1;
 }
 
@@ -106,8 +142,9 @@ desenfileira(Fila *fila)
         fila->inicio = fila_proxima_posicao(fila->inicio, fila);
     }
     else if(fila->disciplina == FILA_LCFS) {
-        c = fila->array[fila->fim];
-        fila->fim = fila_posicao_anterior(fila->fim, fila);
+        int p = fila_posicao_anterior(fila->fim, fila);
+        c = fila->array[p];
+        fila->fim = p;
     }
     else {
         assert(0 && "disciplina invalida");
@@ -116,11 +153,14 @@ desenfileira(Fila *fila)
 }
 
 void
-avanca_simulacao(Fila *fila, ListaEventos *eventos)
+avanca_simulacao(Fila *fila, ListaEventos *eventos, Metricas *metricas)
 {
-    for(int i = 0; i < eventos->tamanho_lista; ++i) {
+    for(int i = 0;
+            i < eventos->tamanho_lista &&
+            metricas->rodada < metricas->numero_de_rodadas;
+            ++i) {
         Evento e = eventos->array[i];
-        atualiza_metricas_clientes_na_espera(e.tempo, fila->Nq, &fila->metricas);
+        atualiza_metricas_clientes_na_espera(e.tempo, fila->Nq, metricas);
         if(e.tipo == EVENTO_CHEGADA_NA_FILA) {
             Cliente c = {.chegada = e.tempo};
             if(fila->servidor_ocupado) {
@@ -136,7 +176,8 @@ avanca_simulacao(Fila *fila, ListaEventos *eventos)
         else if(e.tipo == EVENTO_SERVICO_COMPLETO) {
             assert(fila->servidor_ocupado);
             Cliente cs = fila->cliente_sendo_servido;
-            atualiza_metricas_tempo_espera(cs, &fila->metricas);
+            atualiza_metricas_tempo_espera(cs, metricas);
+            atualiza_metricas_fim_da_rodada(metricas);
             bzero(&fila->cliente_sendo_servido, sizeof(Cliente));
             if(fila->Nq > 0) {
                 Cliente c = desenfileira(fila);
@@ -196,22 +237,18 @@ gera_amostra(enum Distribuicao distribuicao, double parametro)
     }
 }
 
-void
-reseta_lista_de_eventos(ListaEventos *lista)
-{
-    bzero(lista->array, sizeof(Evento)*lista->tamanho_lista);
-    lista->tamanho_lista = 0;
-}
-
 int
 main()
 {
     ListaEventos *eventos = (ListaEventos*)calloc(1,sizeof(*eventos)); // fazendo isso pq 'eventos' vai ter q ser ponteiro depois
     Fila *fila = (Fila*)calloc(1,sizeof(*fila));
+    Metricas *metricas = (Metricas*)calloc(1,sizeof(Metricas));
 
     eventos->tamanho_array = sizeof(eventos->array)/sizeof(*eventos->array);
     fila->tamanho_array = sizeof(fila->array)/sizeof(*fila->array);
     fila->disciplina = FILA_FCFS;
+    metricas->coletas_por_rodada = 3500;
+    metricas->numero_de_rodadas = 4000;
 
     // gera primeira chegada
     {
@@ -220,26 +257,52 @@ main()
             .tipo = EVENTO_CHEGADA_NA_FILA,
         };
         insere(chegada, eventos);
+        eventos->chegadas_sem_servico = 1;
     }
-    for(double t = 0; fila->metricas.coletas_clientes < 3500*1000;) {
+
+    for(double t_servico = 0, t_chegada = 0;
+            metricas->rodada < metricas->numero_de_rodadas;) {
+
+        assert(eventos->chegadas_sem_servico >= 1);
+        if(eventos->chegadas_sem_servico == 1) {
+            t_servico = t_chegada;
+        }
         Evento servico = {
-            .tempo = t + gera_amostra(DISTRIBUICAO_EXPONENCIAL, 1),
+            .tempo = t_servico + gera_amostra(DISTRIBUICAO_EXPONENCIAL, 1),
             .tipo = EVENTO_SERVICO_COMPLETO,
         };
-
-        Evento chegada = {0};
-        for(;;) {
-            chegada.tempo = t + gera_amostra(DISTRIBUICAO_EXPONENCIAL, 0.001),
-            chegada.tipo = EVENTO_CHEGADA_NA_FILA,
-            t = chegada.tempo;
-            if(servico.tempo < t) {
-                break;
-            }
-            insere(chegada, eventos);
-        }
         insere(servico, eventos);
-        avanca_simulacao(fila, eventos);
-        reseta_lista_de_eventos(eventos);
-        insere(chegada, eventos);
+        eventos->chegadas_sem_servico -= 1;
+        t_servico = servico.tempo;
+
+        while(t_chegada <= t_servico) {
+            Evento chegada = {0};
+            chegada.tempo = t_chegada + gera_amostra(DISTRIBUICAO_EXPONENCIAL, .9),
+            chegada.tipo = EVENTO_CHEGADA_NA_FILA,
+            t_chegada = chegada.tempo;
+            insere(chegada, eventos);
+            eventos->chegadas_sem_servico += 1;
+        }
+
+        Evento ultima_chegada = eventos->array[eventos->tamanho_lista-1];
+        assert(ultima_chegada.tipo == EVENTO_CHEGADA_NA_FILA);
+        bzero(&eventos->array[eventos->tamanho_lista-1], sizeof(Evento));
+        eventos->tamanho_lista -= 1;
+        avanca_simulacao(fila, eventos, metricas);
+        bzero(eventos->array, eventos->tamanho_lista*sizeof(Evento));
+        eventos->tamanho_lista = 0;
+        insere(ultima_chegada, eventos);
     }
+
+    assert(metricas->rodada == metricas->numero_de_rodadas);
+    double media_espera = metricas->somatorio_media_tempo_espera /
+        metricas->numero_de_rodadas;
+    double media_Nq = metricas->somatorio_media_Nq / 
+        metricas->numero_de_rodadas;
+
+    printf("media espera: %f\n", media_espera);
+    printf("numero de rodadas: %i\n", metricas->rodada);
+    printf("media Nq: %f\n", media_Nq);
+    printf("tempo considerado: %f\n", metricas->ultima_vez_que_atualizou_area);
+    printf("estimativa da taxa de chegada usando Little: %.9f\n", media_Nq/media_espera);
 }
