@@ -1,8 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <assert.h>
 #include <math.h>
 #include <string.h>
+#include <assert.h>
 
 enum TipoEvento {
     EVENTO_INVALIDO,
@@ -14,6 +14,7 @@ enum Distribuicao {
     DISTRIBUICAO_INVALIDA,
     DISTRIBUICAO_CONSTANTE,
     DISTRIBUICAO_EXPONENCIAL,
+    DISTRIBUICAO_DETERMINISTICA,
 };
 
 enum Disciplina {
@@ -23,16 +24,23 @@ enum Disciplina {
 };
 
 typedef struct Metricas_ {
-    double somatorio_tempo_espera_rodada;
+    double somatorio_tempo_espera;
+    double somatorio_tempo_espera_quadrado;
     double somatorio_media_tempo_espera;
     double somatorio_media_tempo_espera_quadrado;
+    double somatorio_variancia_tempo_espera;
+    double somatorio_variancia_tempo_espera_quadrado;
     double area_Nq_versus_tempo;
+    double area_Nq_quadrado_versus_tempo;
     double somatorio_media_Nq;
+    double somatorio_media_Nq_quadrado;
+    double somatorio_variancia_Nq;
+    double somatorio_variancia_Nq_quadrado;
     double ultima_vez_que_atualizou_area;
     double inicio_rodada;
     int coletas_clientes;
     int coletas_por_rodada;
-    int rodada;
+    int rodada; // rodada zero é a fase transiente
     int numero_de_rodadas;
 } Metricas;
 
@@ -65,6 +73,13 @@ typedef struct Fila_ {
     enum Disciplina disciplina;
 } Fila;
 
+double
+estima_variancia(double soma_quadrados, double soma, int n)
+{
+    assert(n > 1);
+    return (1/(n-1))*(soma_quadrados - soma*soma/n);
+}
+
 void
 atualiza_metricas_fim_da_rodada(Metricas *m)
 {
@@ -74,19 +89,35 @@ atualiza_metricas_fim_da_rodada(Metricas *m)
         // atualiza metricas
         {
             double media_tempo_espera =
-                m->somatorio_tempo_espera_rodada / m->coletas_clientes;
+                m->somatorio_tempo_espera / m->coletas_clientes;
             m->somatorio_media_tempo_espera += media_tempo_espera;
-            m->somatorio_media_tempo_espera_quadrado =
+            m->somatorio_media_tempo_espera_quadrado +=
                 media_tempo_espera*media_tempo_espera;
 
-            double media_Nq = m->area_Nq_versus_tempo /
-                (m->ultima_vez_que_atualizou_area - m->inicio_rodada); // TODO: checar se faz sentido fazer '(ultima_vez_que_atualizou_area - inicio_rodada)'
+            double variancia_tempo_espera =
+                estima_variancia(m->somatorio_tempo_espera_quadrado,
+                        m->somatorio_tempo_espera, m->coletas_clientes);
+            m->somatorio_variancia_tempo_espera += variancia_tempo_espera;
+            m->somatorio_variancia_tempo_espera_quadrado +=
+                variancia_tempo_espera * variancia_tempo_espera;
+
+            double dt = m->ultima_vez_que_atualizou_area - m->inicio_rodada; // TODO: checar se faz sentido fazer '(ultima_vez_que_atualizou_area - inicio_rodada)'
+            double media_Nq = m->area_Nq_versus_tempo / dt;
+            double media_Nq_quadrado = media_Nq*media_Nq;
             m->somatorio_media_Nq += media_Nq;
+            m->somatorio_media_Nq_quadrado += media_Nq_quadrado;
+
+            double variancia_Nq =
+                m->area_Nq_quadrado_versus_tempo/dt - media_Nq_quadrado;
+            m->somatorio_variancia_Nq += variancia_Nq;
+            m->somatorio_variancia_Nq_quadrado += variancia_Nq*variancia_Nq;
         }
         // reinicia metricas da rodada
         {
-            m->somatorio_tempo_espera_rodada = 0;
+            m->somatorio_tempo_espera = 0;
+            m->somatorio_tempo_espera_quadrado = 0;
             m->area_Nq_versus_tempo = 0;
+            m->area_Nq_quadrado_versus_tempo = 0;
             m->coletas_clientes = 0;
             m->inicio_rodada = m->ultima_vez_que_atualizou_area; // TODO: checar se isso faz sentido
         }
@@ -99,7 +130,9 @@ atualiza_metricas_tempo_espera(Cliente c, Metricas *m)
 {
     double tempo_espera = c.comeco_servico - c.chegada;
     assert(tempo_espera >= 0);
-    m->somatorio_tempo_espera_rodada += tempo_espera;
+    m->somatorio_tempo_espera += tempo_espera;
+    m->somatorio_tempo_espera_quadrado +=
+        tempo_espera*tempo_espera;
     m->coletas_clientes += 1;
 }
 
@@ -108,6 +141,7 @@ atualiza_metricas_clientes_na_espera(double tempo, int Nq, Metricas *m)
 {
     double dt = tempo - m->ultima_vez_que_atualizou_area;
     m->area_Nq_versus_tempo += Nq * dt;
+    m->area_Nq_quadrado_versus_tempo += Nq*Nq*dt;
     m->ultima_vez_que_atualizou_area = tempo;
 }
 
@@ -172,6 +206,9 @@ avanca_simulacao(Fila *fila, ListaEventos *eventos, Metricas *metricas)
                 fila->cliente_sendo_servido = c;
                 fila->servidor_ocupado = 1;
             }
+            //int iteracao = metricas->rodada*metricas->coletas_por_rodada +
+            //    metricas->coletas_clientes;
+            //printf("%i Nq: %i\n", iteracao, fila->Nq);
         }
         else if(e.tipo == EVENTO_SERVICO_COMPLETO) {
             assert(fila->servidor_ocupado);
@@ -222,6 +259,12 @@ gera_amostra(enum Distribuicao distribuicao, double parametro)
         return parametro;
     }
 
+    if(distribuicao == DISTRIBUICAO_DETERMINISTICA) {
+        static int i = 0;
+        i += 1;
+        return (i%2 == 0) ? 4*parametro : parametro;
+    }
+
     double u = random_01();
     
     if(distribuicao == DISTRIBUICAO_EXPONENCIAL) {
@@ -234,6 +277,7 @@ gera_amostra(enum Distribuicao distribuicao, double parametro)
     }
     else {
         assert(0 && "distribuicao invalida");
+        return 0;
     }
 }
 
@@ -277,8 +321,8 @@ main()
 
         while(t_chegada <= t_servico) {
             Evento chegada = {0};
-            chegada.tempo = t_chegada + gera_amostra(DISTRIBUICAO_EXPONENCIAL, .9),
-            chegada.tipo = EVENTO_CHEGADA_NA_FILA,
+            chegada.tempo = t_chegada + gera_amostra(DISTRIBUICAO_EXPONENCIAL, .9);
+            chegada.tipo = EVENTO_CHEGADA_NA_FILA;
             t_chegada = chegada.tempo;
             insere(chegada, eventos);
             eventos->chegadas_sem_servico += 1;
@@ -295,14 +339,37 @@ main()
     }
 
     assert(metricas->rodada == metricas->numero_de_rodadas);
-    double media_espera = metricas->somatorio_media_tempo_espera /
-        metricas->numero_de_rodadas;
-    double media_Nq = metricas->somatorio_media_Nq / 
-        metricas->numero_de_rodadas;
+    int rodadas = metricas->numero_de_rodadas;
 
+    double media_espera = metricas->somatorio_media_tempo_espera / rodadas;
+    double variancia_espera = estima_variancia(
+            metricas->somatorio_media_tempo_espera_quadrado,
+            metricas->somatorio_media_tempo_espera, rodadas);
+    double media_variancia_espera =
+        metricas->somatorio_variancia_tempo_espera / rodadas;
+    double variancia_variancia_espera = estima_variancia(
+            metricas->somatorio_variancia_tempo_espera_quadrado,
+            metricas->somatorio_variancia_tempo_espera, rodadas);
+
+    double media_Nq = metricas->somatorio_media_Nq / rodadas;
+    double variancia_Nq = estima_variancia(
+            metricas->somatorio_media_Nq_quadrado,
+            metricas->somatorio_media_Nq, rodadas);
+    double media_variancia_Nq = metricas->somatorio_variancia_Nq / rodadas;
+    double variancia_variancia_Nq = estima_variancia(
+            metricas->somatorio_variancia_Nq_quadrado,
+            metricas->somatorio_variancia_Nq, rodadas);
+
+    // TODO: checar por que as variâncias estão dando zero
     printf("media espera: %f\n", media_espera);
-    printf("numero de rodadas: %i\n", metricas->rodada);
+    printf("variancia espera: %f\n", variancia_espera);
+    printf("media variancia espera: %f\n", media_variancia_espera);
+    printf("variancia variancia espera: %f\n", variancia_variancia_espera);
     printf("media Nq: %f\n", media_Nq);
+    printf("variancia Nq: %f\n", variancia_Nq);
+    printf("media variancia Nq: %f\n", media_variancia_Nq);
+    printf("variancia variancia Nq: %f\n", variancia_variancia_Nq);
+    printf("numero de rodadas: %i\n", metricas->rodada);
     printf("tempo considerado: %f\n", metricas->ultima_vez_que_atualizou_area);
     printf("estimativa da taxa de chegada usando Little: %.9f\n", media_Nq/media_espera);
 }
