@@ -73,19 +73,97 @@ typedef struct Fila_ {
     enum Disciplina disciplina;
 } Fila;
 
+typedef struct Intervalo_ {
+    double inf; // limite inferior do intervalo
+    double sup; // limite superior do intervalo
+} Intervalo;
+
+typedef struct ParametrosDistribuicao_ {
+    enum Distribuicao servidor;
+    enum Distribuicao chegada;
+    double parametro_servidor;
+    double parametro_chegada;
+} ParametrosDistribuicao;
+
+typedef struct ParametrosSimulacao_ {
+    enum Disciplina disciplina_fila;
+    ParametrosDistribuicao distribuicao;
+    int numero_de_rodadas;
+    int coletas_por_rodada;
+    int coletas_fase_transiente;
+} ParametrosSimulacao;
+
+double
+calc_media_Nq(double rho)
+{
+    return (rho*rho)/(1-rho);
+}
+
+double
+calc_variancia_Nq(double rho)
+{
+    return rho/((1-rho)*(1-rho)) - rho - rho*rho;
+}
+
+double
+calc_media_tempo_espera(double rho)
+{
+    return rho/(1-rho);
+}
+
+double
+calc_variancia_tempo_espera_FCFS(double rho)
+{
+    return (2*rho - rho*rho)/((1-rho)*(1-rho));
+}
+
+double
+calc_variancia_tempo_espera_LCFS(double rho)
+{
+    double media = calc_media_tempo_espera(rho);
+    return (calc_variancia_tempo_espera_FCFS(rho) + rho*media*media)/(1-rho);
+}
+
+double
+precisao_intervalo(Intervalo i)
+{
+    return (i.sup - i.inf) / (i.sup + i.inf);
+}
+
+Intervalo
+intervalo_chiquadrado(double variancia, int k)
+{
+    // alfa = 0.05 e 3199 graus de liberdade
+    double quantil_1 = 3357.658; // probabilidade 1 - alfa/2
+    double quantil_2 = 3044.13;  // probabilidade alfa/2
+    double x = k*3199*variancia;
+    Intervalo i = {.inf = x/quantil_1, .sup = x/quantil_2};
+    return i;
+}
+
+Intervalo
+intervalo_tstudent(double media, double variancia)
+{
+    // alfa=0.05 e 3199 graus de liberdade
+    double quantil = 1.960706;
+    double x = quantil*sqrt(variancia/3200.);
+    Intervalo i = {.inf = media-x, .sup = media+x};
+    return i;
+}
+
 double
 estima_variancia(double soma_quadrados, double soma, int n)
 {
     assert(n > 1);
-    return (1/(n-1))*(soma_quadrados - soma*soma/n);
+    return (1./(n-1))*(soma_quadrados - soma*soma/n);
 }
 
 void
 atualiza_metricas_fim_da_rodada(Metricas *m)
 {
-    assert(m->coletas_clientes <= m->coletas_por_rodada);
     // finaliza rodada
     if(m->coletas_clientes >= m->coletas_por_rodada) {
+        assert(m->coletas_clientes == m->coletas_por_rodada);
         // atualiza metricas
         {
             double media_tempo_espera =
@@ -100,6 +178,7 @@ atualiza_metricas_fim_da_rodada(Metricas *m)
             m->somatorio_variancia_tempo_espera += variancia_tempo_espera;
             m->somatorio_variancia_tempo_espera_quadrado +=
                 variancia_tempo_espera * variancia_tempo_espera;
+            //printf("%i variancia: %f\n", m->rodada, variancia_tempo_espera);
 
             double dt = m->ultima_vez_que_atualizou_area - m->inicio_rodada; // TODO: checar se faz sentido fazer '(ultima_vez_que_atualizou_area - inicio_rodada)'
             double media_Nq = m->area_Nq_versus_tempo / dt;
@@ -206,9 +285,6 @@ avanca_simulacao(Fila *fila, ListaEventos *eventos, Metricas *metricas)
                 fila->cliente_sendo_servido = c;
                 fila->servidor_ocupado = 1;
             }
-            //int iteracao = metricas->rodada*metricas->coletas_por_rodada +
-            //    metricas->coletas_clientes;
-            //printf("%i Nq: %i\n", iteracao, fila->Nq);
         }
         else if(e.tipo == EVENTO_SERVICO_COMPLETO) {
             assert(fila->servidor_ocupado);
@@ -225,6 +301,12 @@ avanca_simulacao(Fila *fila, ListaEventos *eventos, Metricas *metricas)
             else {
                 fila->servidor_ocupado = 0;
             }
+
+#if 0
+            int iteracao = metricas->rodada*metricas->coletas_por_rodada +
+                metricas->coletas_clientes;
+            printf("%i Nq: %i\n", iteracao, fila->Nq);
+#endif
         }
     }
 }
@@ -281,30 +363,103 @@ gera_amostra(enum Distribuicao distribuicao, double parametro)
     }
 }
 
-int
-main()
+void
+print_info_tstudent(double valor_teorico,
+        double somatorio, double somatorio_quadrados, int rodadas)
 {
-    ListaEventos *eventos = (ListaEventos*)calloc(1,sizeof(*eventos)); // fazendo isso pq 'eventos' vai ter q ser ponteiro depois
-    Fila *fila = (Fila*)calloc(1,sizeof(*fila));
-    Metricas *metricas = (Metricas*)calloc(1,sizeof(Metricas));
+    double media = somatorio / rodadas;
+    double variancia = estima_variancia(somatorio_quadrados, somatorio, rodadas);
+    Intervalo intervalo = intervalo_tstudent(media, variancia);
+    double precisao = precisao_intervalo(intervalo);
+    int teorico_dentro_do_intervalo =
+        valor_teorico >= intervalo.inf && valor_teorico <= intervalo.sup;
 
-    eventos->tamanho_array = sizeof(eventos->array)/sizeof(*eventos->array);
-    fila->tamanho_array = sizeof(fila->array)/sizeof(*fila->array);
-    fila->disciplina = FILA_FCFS;
-    metricas->coletas_por_rodada = 3500;
-    metricas->numero_de_rodadas = 4000;
+    char const *naosim[] = {"não", "sim"};
+    char const *sp = "|   |   |-- ";
+    printf("%sintervalo de confiança: [%f,%f]\n", sp, intervalo.inf, intervalo.sup);
+    printf("%sprecisao do intervalo: %f\n", sp, precisao);
+    printf("%scentro do intervalo: %f\n", sp, (intervalo.inf+intervalo.sup)/2);
+    printf("%svalor teórico (analítico): %f\n", sp, valor_teorico);
+    printf("%svalor teórico dentro do intervalo: %s\n", sp,
+            naosim[teorico_dentro_do_intervalo]);
+    printf("%svariancia do valor médio: %f\n", sp, variancia);
+}
 
-    // gera primeira chegada
-    {
-        Evento chegada = {
-            .tempo = 0,
-            .tipo = EVENTO_CHEGADA_NA_FILA,
-        };
-        insere(chegada, eventos);
-        eventos->chegadas_sem_servico = 1;
-    }
+void
+print_info_chiquadrado(double somatorio, double somatorio_quadrados,
+        int rodadas, int coletas_por_rodada)
+{
+    double variancia = estima_variancia(somatorio_quadrados, somatorio, rodadas);
+    Intervalo intervalo= intervalo_chiquadrado(variancia, coletas_por_rodada);
+    double precisao = precisao_intervalo(intervalo);
 
-    for(double t_servico = 0, t_chegada = 0;
+    char const *sp = "|   |   |-- ";
+    printf("%sintervalo de confiança: [%f,%f]\n", sp, intervalo.inf, intervalo.sup);
+    printf("%sprecisao do intervalo: %f\n", sp, precisao);
+    printf("%scentro do intervalo: %f\n", sp, (intervalo.inf+intervalo.sup)/2);
+    printf("%svariancia do valor médio: %f\n", sp, variancia);
+}
+
+void
+print_info(Metricas metricas, double rho, enum Disciplina disciplina_fila)
+{
+    // TODO: o cálculo da variancia usando chi quadrado está zaralhado, tenho q consertar isso
+    assert(metricas.rodada == metricas.numero_de_rodadas);
+    int rodadas = metricas.numero_de_rodadas;
+    int coletas = metricas.coletas_por_rodada;
+
+    char const *sp1 = "|-- ";
+    printf("%sutilização usada: %.2f\n", sp1, rho);
+
+    char const *sp2 = "|   |-- ";
+    printf("%sMédia do tempo de espera:\n", sp2);
+    print_info_tstudent(calc_media_tempo_espera(rho),
+            metricas.somatorio_media_tempo_espera,
+            metricas.somatorio_media_tempo_espera_quadrado, rodadas);
+    printf("|   |\n");
+    double variancia_teorica_tempo_espera = (disciplina_fila == FILA_FCFS) ?
+        calc_variancia_tempo_espera_FCFS(rho) : calc_variancia_tempo_espera_LCFS(rho);
+    printf("%sVariancia do tempo de espera usando t-student:\n", sp2);
+    print_info_tstudent(variancia_teorica_tempo_espera,
+            metricas.somatorio_variancia_tempo_espera,
+            metricas.somatorio_variancia_tempo_espera_quadrado, rodadas);
+    printf("|   |\n");
+    printf("%sVariancia do tempo de espera usando chi quadrado:\n", sp2);
+    print_info_chiquadrado(metricas.somatorio_media_tempo_espera,
+            metricas.somatorio_media_tempo_espera_quadrado, rodadas, coletas);
+    printf("|   |\n");
+
+    printf("%sMédia de Nq:\n", sp2);
+    print_info_tstudent(calc_media_Nq(rho),
+            metricas.somatorio_media_Nq,
+            metricas.somatorio_media_Nq_quadrado, rodadas);
+    printf("|   |\n");
+    printf("%sVariancia de Nq t-student:\n", sp2);
+    print_info_tstudent(calc_variancia_Nq(rho),
+            metricas.somatorio_variancia_Nq,
+            metricas.somatorio_variancia_Nq_quadrado, rodadas);
+    printf("|   |\n");
+    printf("%sVariancia de Nq usando chi quadrado:\n", sp2);
+    print_info_chiquadrado(metricas.somatorio_media_Nq,
+            metricas.somatorio_media_Nq_quadrado, rodadas, coletas);
+    printf("|   |\n");
+
+    double media_espera = metricas.somatorio_media_tempo_espera / rodadas;
+    double media_Nq = metricas.somatorio_media_Nq / rodadas;
+
+    printf("%sestimativa da taxa de chegada usando Little: %.9f\n",
+            sp2, media_Nq/media_espera);
+    printf("%snumero de rodadas: %i\n", sp2, metricas.rodada);
+    printf("%scoletas por rodada: %i\n", sp2, metricas.coletas_por_rodada);
+    printf("%stempo considerado: %f\n", sp2, metricas.ultima_vez_que_atualizou_area);
+}
+
+double
+loop_simulacao(ListaEventos *eventos, Fila *fila, Metricas *metricas,
+        ParametrosDistribuicao dist_param, double tempo_inicial)
+{
+    assert(eventos->tamanho_lista == 1);
+    for(double t_servico = tempo_inicial, t_chegada = tempo_inicial;
             metricas->rodada < metricas->numero_de_rodadas;) {
 
         assert(eventos->chegadas_sem_servico >= 1);
@@ -312,7 +467,8 @@ main()
             t_servico = t_chegada;
         }
         Evento servico = {
-            .tempo = t_servico + gera_amostra(DISTRIBUICAO_EXPONENCIAL, 1),
+            .tempo = t_servico +
+                gera_amostra(dist_param.servidor, dist_param.parametro_servidor),
             .tipo = EVENTO_SERVICO_COMPLETO,
         };
         insere(servico, eventos);
@@ -321,7 +477,8 @@ main()
 
         while(t_chegada <= t_servico) {
             Evento chegada = {0};
-            chegada.tempo = t_chegada + gera_amostra(DISTRIBUICAO_EXPONENCIAL, .9);
+            chegada.tempo = t_chegada +
+                gera_amostra(dist_param.chegada, dist_param.parametro_chegada);
             chegada.tipo = EVENTO_CHEGADA_NA_FILA;
             t_chegada = chegada.tempo;
             insere(chegada, eventos);
@@ -337,39 +494,71 @@ main()
         eventos->tamanho_lista = 0;
         insere(ultima_chegada, eventos);
     }
+    assert(eventos->tamanho_lista == 1);
+    return eventos->array[0].tempo;
+}
 
-    assert(metricas->rodada == metricas->numero_de_rodadas);
-    int rodadas = metricas->numero_de_rodadas;
+Metricas
+gera_metricas(ParametrosSimulacao param)
+{
+    ListaEventos eventos = {0};
+    Fila fila = {0};
 
-    double media_espera = metricas->somatorio_media_tempo_espera / rodadas;
-    double variancia_espera = estima_variancia(
-            metricas->somatorio_media_tempo_espera_quadrado,
-            metricas->somatorio_media_tempo_espera, rodadas);
-    double media_variancia_espera =
-        metricas->somatorio_variancia_tempo_espera / rodadas;
-    double variancia_variancia_espera = estima_variancia(
-            metricas->somatorio_variancia_tempo_espera_quadrado,
-            metricas->somatorio_variancia_tempo_espera, rodadas);
+    eventos.tamanho_array = sizeof(eventos.array)/sizeof(*eventos.array);
+    fila.tamanho_array = sizeof(fila.array)/sizeof(*fila.array);
+    fila.disciplina = param.disciplina_fila;
 
-    double media_Nq = metricas->somatorio_media_Nq / rodadas;
-    double variancia_Nq = estima_variancia(
-            metricas->somatorio_media_Nq_quadrado,
-            metricas->somatorio_media_Nq, rodadas);
-    double media_variancia_Nq = metricas->somatorio_variancia_Nq / rodadas;
-    double variancia_variancia_Nq = estima_variancia(
-            metricas->somatorio_variancia_Nq_quadrado,
-            metricas->somatorio_variancia_Nq, rodadas);
+    Metricas metricas = {0};
+    metricas.numero_de_rodadas = 1;
+    metricas.coletas_por_rodada = param.coletas_fase_transiente;
 
-    // TODO: checar por que as variâncias estão dando zero
-    printf("media espera: %f\n", media_espera);
-    printf("variancia espera: %f\n", variancia_espera);
-    printf("media variancia espera: %f\n", media_variancia_espera);
-    printf("variancia variancia espera: %f\n", variancia_variancia_espera);
-    printf("media Nq: %f\n", media_Nq);
-    printf("variancia Nq: %f\n", variancia_Nq);
-    printf("media variancia Nq: %f\n", media_variancia_Nq);
-    printf("variancia variancia Nq: %f\n", variancia_variancia_Nq);
-    printf("numero de rodadas: %i\n", metricas->rodada);
-    printf("tempo considerado: %f\n", metricas->ultima_vez_que_atualizou_area);
-    printf("estimativa da taxa de chegada usando Little: %.9f\n", media_Nq/media_espera);
+    // gera primeira chegada
+    {
+        Evento chegada = {
+            .tempo = 0,
+            .tipo = EVENTO_CHEGADA_NA_FILA,
+        };
+        insere(chegada, &eventos);
+        eventos.chegadas_sem_servico = 1;
+    }
+    // roda fase transiente
+    double t = loop_simulacao(&eventos, &fila, &metricas, param.distribuicao, 0);
+
+    bzero(&metricas, sizeof(metricas));
+    metricas.numero_de_rodadas = param.numero_de_rodadas;
+    metricas.coletas_por_rodada = param.coletas_por_rodada;
+    loop_simulacao(&eventos, &fila, &metricas, param.distribuicao, t);
+
+    return metricas;
+}
+
+int
+main()
+{
+    ParametrosSimulacao param = {0};
+    param.numero_de_rodadas = 3200;
+    param.coletas_por_rodada = 50000;
+    param.coletas_fase_transiente = 2000;
+    param.distribuicao.servidor = DISTRIBUICAO_EXPONENCIAL;
+    param.distribuicao.chegada = DISTRIBUICAO_EXPONENCIAL;
+    param.distribuicao.parametro_servidor = 1;
+    
+    char const *disciplinas[] = {"FCFS", "LCFS"};
+    for(int i = 0; i <= 1; ++i) {
+
+        printf("Disciplina da fila: %s\n", disciplinas[i]);
+
+        param.disciplina_fila = i == 0 ? FILA_FCFS : FILA_LCFS;
+
+        double const lista_rho[] = {.2, .4, .6, .8, .9};
+        int tamanho_lista_rho = sizeof(lista_rho)/sizeof(*lista_rho);
+        for(int j = 0; j < tamanho_lista_rho; ++j) {
+            double rho = lista_rho[j];
+            param.distribuicao.parametro_chegada = rho;
+            Metricas metricas = gera_metricas(param);
+            printf("|\n");
+            print_info(metricas, rho, param.disciplina_fila);
+        }
+        printf("\n");
+    }
 }
