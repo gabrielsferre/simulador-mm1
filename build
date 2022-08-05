@@ -14,5 +14,7 @@ case $1 in
         else
             gdb -tui a.out
         fi;;
+    teste1) ./a.out teste;;
+    teste2) ./a.out teste teste;;
     *) ./a.out;;
 esac
